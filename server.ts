@@ -6,7 +6,7 @@ import dbConnect from "./lib/db";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "localhost";
-const port = parseInt(process.env.PORT || "3001", 10);
+const port = parseInt(process.env.PORT || "8000", 10);
 // when using middleware `hostname` and `port` must be provided below
 const app = next({ dev, hostname, port });
 const handler = app.getRequestHandler();

@@ -687,14 +687,14 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     </div>
                 </CardHeader>
 
-                {localStream && (
+                {/* {localStream && (
                     <CallInterface
                         localStream={localStream}
                         remoteStreams={remoteStreams}
                         onLeave={leaveCall}
                         nicknames={nicknames}
                     />
-                )}
+                )} */}
 
                 <CardContent className="flex-1 overflow-hidden p-0 relative">
                     <ScrollArea className="h-full px-4 py-2">

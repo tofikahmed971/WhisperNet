@@ -1,0 +1,108 @@
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { login } from "@/actions/login";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import Link from "next/link";
+
+export default function LoginPage() {
+    const [email, setEmail] = useState("");
+    const [password, setPassword] = useState("");
+    const [token, setToken] = useState("");
+    const [showTwoFactor, setShowTwoFactor] = useState(false);
+    const [error, setError] = useState("");
+    const router = useRouter();
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError("");
+
+        try {
+            const res = await login({
+                email,
+                password,
+                token: showTwoFactor ? token : undefined,
+            });
+
+            if (res?.requires2FA) {
+                setShowTwoFactor(true);
+            } else if (res?.error) {
+                setError(res.error);
+            } else {
+                router.push("/settings");
+                router.refresh();
+            }
+        } catch (err) {
+            setError("Something went wrong");
+        }
+    };
+
+    return (
+        <div className="flex items-center justify-center min-h-screen bg-slate-950">
+            <Card className="w-[350px] bg-slate-900 border-slate-800 text-slate-100">
+                <CardHeader>
+                    <CardTitle>Login</CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <form onSubmit={handleSubmit} className="space-y-4">
+                        {!showTwoFactor && (
+                            <>
+                                <div className="space-y-2">
+                                    <label htmlFor="email">Email</label>
+                                    <Input
+                                        id="email"
+                                        type="email"
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        required
+                                        className="bg-slate-950 border-slate-800"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label htmlFor="password">Password</label>
+                                    <Input
+                                        id="password"
+                                        type="password"
+                                        value={password}
+                                        onChange={(e) => setPassword(e.target.value)}
+                                        required
+                                        className="bg-slate-950 border-slate-800"
+                                    />
+                                </div>
+                            </>
+                        )}
+
+                        {showTwoFactor && (
+                            <div className="space-y-2">
+                                <label htmlFor="token">2FA Code</label>
+                                <Input
+                                    id="token"
+                                    type="text"
+                                    value={token}
+                                    onChange={(e) => setToken(e.target.value)}
+                                    required
+                                    placeholder="123456"
+                                    className="bg-slate-950 border-slate-800"
+                                />
+                            </div>
+                        )}
+
+                        {error && <p className="text-red-500 text-sm">{error}</p>}
+
+                        <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700">
+                            {showTwoFactor ? "Verify" : "Login"}
+                        </Button>
+                    </form>
+                    <div className="mt-4 text-center text-sm">
+                        <Link href="/register" className="text-emerald-500 hover:underline">
+                            Don't have an account? Register
+                        </Link>
+                    </div>
+                </CardContent>
+            </Card>
+        </div>
+    );
+}

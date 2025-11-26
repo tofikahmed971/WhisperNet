@@ -20,9 +20,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Send, User, Lock, Check, CheckCheck, Smile, Paperclip, FileIcon, Download, Image as ImageIcon } from "lucide-react";
+import { Send, User, Users, Lock, Check, CheckCheck, Smile, Paperclip, FileIcon, Download, Image as ImageIcon, Settings, Phone, Mic, MicOff, UserX, X } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { useTheme } from "next-themes";
+import { useWebRTC } from "@/hooks/useWebRTC";
+import CallInterface from "./CallInterface";
 
 const EmojiPicker = dynamic(() => import("emoji-picker-react"), { ssr: false });
 
@@ -38,9 +44,10 @@ interface Message {
         name: string;
         size: number;
         mimeType: string;
-        url?: string; // For decrypted file blob URL
+        url?: string;
     };
-    encryptedKey?: string; // Store the encrypted AES key for this user
+    encryptedKey?: string;
+    reactions?: Record<string, string[]>; // emoji -> [senderIds]
 }
 
 interface ChatRoomProps {
@@ -56,19 +63,28 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
     const [showEmojiPicker, setShowEmojiPicker] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
+    const [activeReactionMessageId, setActiveReactionMessageId] = useState<string | null>(null);
+
+    // Advanced Controls State
+    const [isCreator, setIsCreator] = useState(false);
+    const [isMuted, setIsMuted] = useState(false);
+    const [showPasswordModal, setShowPasswordModal] = useState(false);
+    const [passwordInput, setPasswordInput] = useState("");
+    const [showSettingsModal, setShowSettingsModal] = useState(false);
+    const [showParticipantsModal, setShowParticipantsModal] = useState(false);
+    const [participants, setParticipants] = useState<{ socketId: string; userId: string; nickname?: string; isMuted?: boolean }[]>([]);
+    const [newLimit, setNewLimit] = useState("");
+    const [newPassword, setNewPassword] = useState("");
 
     const searchParams = useSearchParams();
     const router = useRouter();
     const nickname = searchParams.get("nickname") || "Anonymous";
     const userLimit = searchParams.get("limit") ? parseInt(searchParams.get("limit")!) : undefined;
+    const { theme } = useTheme();
+    const { localStream, remoteStreams, joinCall, leaveCall } = useWebRTC(roomId);
 
-    // My keys
     const myKeys = useRef<{ public: CryptoKey; private: CryptoKey } | null>(null);
-
-    // Other users' public keys: Map<userId, CryptoKey>
     const otherUsersKeys = useRef<Map<string, CryptoKey>>(new Map());
-
-    // Messages end ref for auto-scroll
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -84,29 +100,73 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
     useEffect(() => {
         const init = async () => {
-            // 0. Get or Create User ID
             let userId = sessionStorage.getItem("userId");
             if (!userId) {
                 userId = crypto.randomUUID();
                 sessionStorage.setItem("userId", userId);
             }
 
-            // 1. Generate my keys
             const keys = await generateKeyPair();
             myKeys.current = { public: keys.publicKey, private: keys.privateKey };
 
-            // 2. Connect to socket with userId
             socket.auth = { userId };
             socket.connect();
 
-            // 3. Join room with nickname and limit
-            socket.emit("join-room", { roomId, nickname, userLimit });
+            const storedPassword = sessionStorage.getItem("temp_room_password");
+            const password = storedPassword || searchParams.get("password");
+            if (storedPassword) sessionStorage.removeItem("temp_room_password");
+
+            socket.emit("join-room", { roomId, nickname, userLimit, password });
             setIsConnected(true);
 
-            // 4. Listeners
             socket.on("error", (err: string) => {
-                alert(err);
+                if (err === "Password required" || err === "Invalid password") {
+                    setShowPasswordModal(true);
+                    if (err === "Invalid password") alert("Invalid password");
+                } else if (err === "You are muted") {
+                    alert(err); // Just alert, don't redirect
+                } else {
+                    alert(err);
+                    router.push("/");
+                }
+            });
+
+            socket.on("room-role", (data: { role: string }) => {
+                if (data.role === "creator") setIsCreator(true);
+            });
+
+            socket.on("kicked", (msg: string) => {
+                alert(msg);
                 router.push("/");
+            });
+
+            socket.on("muted", (msg: string) => {
+                setIsMuted(true);
+                alert(msg);
+            });
+
+            socket.on("unmuted", (msg: string) => {
+                setIsMuted(false);
+                alert(msg);
+            });
+
+            socket.on("room-participants", (data: { socketId: string; userId: string; nickname?: string; isMuted: boolean }[]) => {
+                setParticipants(data);
+                const newMap = new Map(nicknames);
+                data.forEach(p => {
+                    if (p.nickname) newMap.set(p.socketId, p.nickname);
+                });
+                setNicknames(newMap);
+            });
+
+            socket.on("user-muted", ({ userId }: { userId: string }) => {
+                setParticipants(prev => prev.map(p => p.userId === userId ? { ...p, isMuted: true } : p));
+                if (userId === sessionStorage.getItem("userId")) setIsMuted(true);
+            });
+
+            socket.on("user-unmuted", ({ userId }: { userId: string }) => {
+                setParticipants(prev => prev.map(p => p.userId === userId ? { ...p, isMuted: false } : p));
+                if (userId === sessionStorage.getItem("userId")) setIsMuted(false);
             });
 
             socket.on("room-info", (data: { count: number }) => {
@@ -114,13 +174,14 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             });
 
             socket.on("user-joined", async (data: { socketId: string; userId: string; nickname?: string }) => {
-                console.log("User joined:", data);
-
                 if (data.nickname) {
                     setNicknames(prev => new Map(prev).set(data.socketId, data.nickname!));
                 }
+                setParticipants(prev => {
+                    if (prev.find(p => p.socketId === data.socketId)) return prev;
+                    return [...prev, { socketId: data.socketId, userId: data.userId, nickname: data.nickname }];
+                });
 
-                // Initiate Key Exchange: Send my Public Key to the new socket
                 if (myKeys.current) {
                     const exportedPub = await exportKey(myKeys.current.public);
                     socket.emit("signal", {
@@ -131,20 +192,15 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             });
 
             socket.on("user-left", (data: { socketId: string; userId: string }) => {
-                console.log("User left:", data);
                 otherUsersKeys.current.delete(data.socketId);
+                setParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
             });
 
             socket.on("signal", async (data: { sender: string; signal: any }) => {
                 const { sender, signal } = data;
-
                 if (signal.type === "offer-key") {
-                    // Received a Public Key from someone
                     const importedKey = await importKey(signal.key, ["encrypt"]);
                     otherUsersKeys.current.set(sender, importedKey);
-                    console.log("Received public key from:", sender);
-
-                    // If I haven't sent my key to them, send it back
                     if (myKeys.current) {
                         const exportedPub = await exportKey(myKeys.current.public);
                         socket.emit("signal", {
@@ -153,23 +209,16 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                         });
                     }
                 } else if (signal.type === "answer-key") {
-                    // Received a Public Key in response to my offer
                     const importedKey = await importKey(signal.key, ["encrypt"]);
                     otherUsersKeys.current.set(sender, importedKey);
-                    console.log("Received answer key from:", sender);
                 }
             });
 
             socket.on("message-status", (data: { messageId: string; status: "delivered" | "read"; originalSenderId: string }) => {
-                console.log("Received message-status:", data, "My socket.id:", socket.id);
                 if (data.originalSenderId === socket.id) {
-                    console.log("Updating status for my message:", data.messageId, "to", data.status);
                     setMessages((prev) =>
                         prev.map((msg) => {
                             if (msg.id === data.messageId) {
-                                console.log("Found message to update. Current status:", msg.status, "New status:", data.status);
-                                // Upgrade status: sent -> delivered -> read
-                                // If already read, don't go back to delivered
                                 if (msg.status === "read") return msg;
                                 if (msg.status === "delivered" && data.status === "delivered") return msg;
                                 return { ...msg, status: data.status };
@@ -177,42 +226,25 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                             return msg;
                         })
                     );
-                } else {
-                    console.log("Message status not for me. Original sender:", data.originalSenderId, "Me:", socket.id);
                 }
             });
 
             socket.on("receive-message", async (data: { senderId: string; payload: any; messageId: string; roomId: string; type?: string }) => {
-                console.log("=== RECEIVE-MESSAGE EVENT ===");
-                console.log("Full data:", JSON.stringify(data, null, 2));
-                console.log("Sender ID:", data.senderId);
-                console.log("Message ID:", data.messageId);
-                console.log("My socket.id:", socket.id);
-
                 const { senderId, payload, messageId, type } = data;
 
-                // Emit Delivered immediately
-                console.log("Emitting message-delivered for messageId:", messageId, "original sender:", senderId);
                 socket.emit("message-delivered", {
                     roomId: data.roomId,
                     messageId,
-                    senderId, // original sender's socket.id
+                    senderId,
                     recipientId: socket.id
                 });
 
                 try {
-                    // 1. Find the encrypted AES key for ME
                     const myEncryptedKey = payload.keys[socket.id || ""];
-                    if (!myEncryptedKey) {
-                        console.error("No key found for me in message");
-                        return;
-                    }
+                    if (!myEncryptedKey) return;
 
-                    // 2. Decrypt AES key with my Private Key
                     if (!myKeys.current) return;
                     const aesKeyRaw = await decryptMessage(myKeys.current.private, myEncryptedKey);
-
-                    // 3. Import AES Key
                     const aesKey = await importSymKey(aesKeyRaw);
 
                     let content = "";
@@ -234,12 +266,10 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                             timestamp: Date.now(),
                             type: (type as "text" | "file") || "text",
                             file: fileData,
-                            encryptedKey: myEncryptedKey // Store for later use (download)
+                            encryptedKey: myEncryptedKey
                         },
                     ]);
 
-                    // Emit Read after successfully displaying the message
-                    console.log("Emitting message-read for messageId:", messageId, "original sender:", senderId);
                     socket.emit("message-read", {
                         roomId,
                         messageId,
@@ -252,23 +282,46 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             });
 
             socket.on("user-typing", ({ socketId, nickname }: { socketId: string; nickname: string }) => {
-                console.log("Received user-typing event. SocketId:", socketId, "Nickname:", nickname);
-                setTypingUsers(prev => {
-                    const newSet = new Set(prev).add(socketId);
-                    console.log("Updated typingUsers. New size:", newSet.size, "Users:", Array.from(newSet));
-                    return newSet;
-                });
+                setTypingUsers(prev => new Set(prev).add(socketId));
                 setNicknames(prev => new Map(prev).set(socketId, nickname));
             });
 
             socket.on("user-stopped-typing", ({ socketId }: { socketId: string }) => {
-                console.log("Received user-stopped-typing event. SocketId:", socketId);
                 setTypingUsers(prev => {
                     const newSet = new Set(prev);
                     newSet.delete(socketId);
-                    console.log("Updated typingUsers after delete. New size:", newSet.size);
                     return newSet;
                 });
+            });
+
+            socket.on("message-reaction-update", (data: { messageId: string; reaction: string; senderId: string }) => {
+                setMessages(prev => prev.map(msg => {
+                    if (msg.id === data.messageId) {
+                        const newReactions = { ...(msg.reactions || {}) };
+
+                        // Check if user is toggling the same reaction
+                        const currentUsers = newReactions[data.reaction] || [];
+                        if (currentUsers.includes(data.senderId)) {
+                            // Remove it (Toggle off)
+                            newReactions[data.reaction] = currentUsers.filter(id => id !== data.senderId);
+                            if (newReactions[data.reaction].length === 0) delete newReactions[data.reaction];
+                        } else {
+                            // Remove user from ALL other reactions first (Single reaction limit)
+                            Object.keys(newReactions).forEach(key => {
+                                const users = newReactions[key] || [];
+                                if (users.includes(data.senderId)) {
+                                    newReactions[key] = users.filter(id => id !== data.senderId);
+                                    if (newReactions[key].length === 0) delete newReactions[key];
+                                }
+                            });
+
+                            // Add new reaction
+                            newReactions[data.reaction] = [...(newReactions[data.reaction] || []), data.senderId];
+                        }
+                        return { ...msg, reactions: newReactions };
+                    }
+                    return msg;
+                }));
             });
         };
 
@@ -284,33 +337,30 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             socket.off("message-status");
             socket.off("user-typing");
             socket.off("user-stopped-typing");
+            socket.off("room-role");
+            socket.off("kicked");
+            socket.off("muted");
+            socket.off("unmuted");
+            socket.off("room-participants");
+            socket.off("message-reaction-update");
             socket.disconnect();
         };
-    }, [roomId, nickname, userLimit, router]);
+    }, [roomId, nickname, userLimit, router, searchParams]);
 
     const sendMessage = async () => {
         if (!inputMessage.trim() || !myKeys.current) return;
 
-        // Clear typing indicator immediately
         if (typingTimeoutRef.current) {
             clearTimeout(typingTimeoutRef.current);
         }
         socket.emit("typing-stop", { roomId });
 
         try {
-            // 1. Generate Session AES Key
             const aesKey = await generateSymKey();
-
-            // 2. Encrypt Message with AES Key
             const encryptedContent = await encryptSymMessage(aesKey, inputMessage);
-
-            // 3. Export AES Key
             const rawAesKey = await exportSymKey(aesKey);
-
-            // 4. Encrypt AES Key for EACH participant
             const keysMap: Record<string, string> = {};
 
-            // For other users
             for (const [userId, pubKey] of otherUsersKeys.current.entries()) {
                 const encryptedAesKey = await encryptMessage(pubKey, rawAesKey);
                 keysMap[userId] = encryptedAesKey;
@@ -318,7 +368,6 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
             const messageId = crypto.randomUUID();
 
-            // Send to server
             socket.emit("send-message", {
                 roomId,
                 payload: {
@@ -330,7 +379,6 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 type: "text"
             });
 
-            // Add to local UI
             setMessages((prev) => [
                 ...prev,
                 {
@@ -351,19 +399,11 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setInputMessage(e.target.value);
-
-        // Emit typing-start
-        console.log("Emitting typing-start to room:", roomId);
         socket.emit("typing-start", { roomId });
-
-        // Clear previous timeout
         if (typingTimeoutRef.current) {
             clearTimeout(typingTimeoutRef.current);
         }
-
-        // Set timeout to emit typing-stop after 2 seconds
         typingTimeoutRef.current = setTimeout(() => {
-            console.log("Emitting typing-stop to room:", roomId);
             socket.emit("typing-stop", { roomId });
         }, 2000);
     };
@@ -371,14 +411,11 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const handleEmojiClick = (emojiData: any) => {
         const emoji = emojiData.emoji;
         const input = inputRef.current;
-
         if (input) {
             const start = input.selectionStart || 0;
             const end = input.selectionEnd || 0;
             const newValue = inputMessage.substring(0, start) + emoji + inputMessage.substring(end);
             setInputMessage(newValue);
-
-            // Set cursor position after emoji
             setTimeout(() => {
                 input.focus();
                 input.setSelectionRange(start + emoji.length, start + emoji.length);
@@ -386,62 +423,38 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
         } else {
             setInputMessage(inputMessage + emoji);
         }
-
         setShowEmojiPicker(false);
     };
 
     const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file || !myKeys.current) return;
-
         if (file.size > 10 * 1024 * 1024) {
             alert("File size must be less than 10MB");
             return;
         }
-
         setIsUploading(true);
         try {
-            // 1. Generate File AES Key
             const fileAesKey = await generateSymKey();
-
-            // 2. Encrypt File Content
             const fileBuffer = await file.arrayBuffer();
             const encryptedFileContent = await encryptFile(fileAesKey, fileBuffer);
-
-            // 3. Create Blob from encrypted content for upload
-            // encryptedFileContent is now ArrayBuffer
             const encryptedBlob = new Blob([encryptedFileContent], { type: "application/octet-stream" });
             const formData = new FormData();
             formData.append("file", encryptedBlob, file.name);
-
-            // 4. Upload Encrypted File
-            const response = await fetch("/api/upload", {
-                method: "POST",
-                body: formData,
-            });
-
+            const response = await fetch("/api/upload", { method: "POST", body: formData });
             if (!response.ok) throw new Error("Upload failed");
             const fileData = await response.json();
-
-            // 5. Encrypt File AES Key for EACH participant (same as message keys)
             const rawFileAesKey = await exportSymKey(fileAesKey);
             const keysMap: Record<string, string> = {};
-
-            // For other users
             for (const [userId, pubKey] of otherUsersKeys.current.entries()) {
                 const encryptedKey = await encryptMessage(pubKey, rawFileAesKey);
                 keysMap[userId] = encryptedKey;
             }
-
-            // Encrypt key for myself too
             if (myKeys.current && socket.id) {
                 const myEncryptedKey = await encryptMessage(myKeys.current.public, rawFileAesKey);
                 keysMap[socket.id] = myEncryptedKey;
             }
-
             const messageId = crypto.randomUUID();
-
-            // 6. Send Message with File Metadata
             socket.emit("send-message", {
                 roomId,
                 payload: {
@@ -458,8 +471,6 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 messageId,
                 type: "file"
             });
-
-            // Add to local UI
             setMessages((prev) => [
                 ...prev,
                 {
@@ -478,10 +489,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     encryptedKey: socket.id ? keysMap[socket.id] : undefined
                 },
             ]);
-
-            // Reset file input
             if (fileInputRef.current) fileInputRef.current.value = "";
-
         } catch (error) {
             console.error("File upload error:", error);
             alert("Failed to upload file");
@@ -492,39 +500,24 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
     const getTypingIndicator = () => {
         if (typingUsers.size === 0) return null;
-
         const typingNames = Array.from(typingUsers).map(socketId =>
             nicknames.get(socketId) || `User ${socketId.slice(0, 4)}`
         );
-
-        if (typingNames.length === 1) {
-            return `${typingNames[0]} is typing...`;
-        } else if (typingNames.length === 2) {
-            return `${typingNames[0]} and ${typingNames[1]} are typing...`;
-        } else {
-            return `${typingNames.length} people are typing...`;
-        }
+        if (typingNames.length === 1) return `${typingNames[0]} is typing...`;
+        if (typingNames.length === 2) return `${typingNames[0]} and ${typingNames[1]} are typing...`;
+        return `${typingNames.length} people are typing...`;
     };
 
     const handleDownload = async (fileId: string, fileName: string, encryptedKey: string) => {
         try {
-            // 1. Fetch Encrypted File
             const response = await fetch(`/api/files/${fileId}`);
             if (!response.ok) throw new Error("Download failed");
-
             const encryptedBlob = await response.blob();
             const encryptedBuffer = await encryptedBlob.arrayBuffer();
-
-            // 2. Decrypt AES Key
             if (!myKeys.current) return;
             const aesKeyRaw = await decryptMessage(myKeys.current.private, encryptedKey);
             const aesKey = await importSymKey(aesKeyRaw);
-
-            // 3. Decrypt File Content
-            // decryptFile now accepts ArrayBuffer directly
             const decryptedBuffer = await decryptFile(aesKey, encryptedBuffer);
-
-            // 4. Create Download Link
             const blob = new Blob([decryptedBuffer]);
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
@@ -534,31 +527,110 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-
         } catch (error) {
             console.error("Download error:", error);
             alert("Failed to download file");
         }
     };
 
+    const handleReaction = (messageId: string, emoji: string) => {
+        if (!socket.id) return;
+
+        // Optimistic update
+        setMessages(prev => prev.map(msg => {
+            if (msg.id === messageId) {
+                const newReactions = { ...(msg.reactions || {}) };
+                const users = newReactions[emoji] || [];
+
+                // Check if user is toggling the same reaction
+                if (users.includes(socket.id!)) {
+                    newReactions[emoji] = users.filter(id => id !== socket.id);
+                    if (newReactions[emoji].length === 0) delete newReactions[emoji];
+                } else {
+                    // Remove user from ALL other reactions first (Single reaction limit)
+                    Object.keys(newReactions).forEach(key => {
+                        const rUsers = newReactions[key] || [];
+                        if (rUsers.includes(socket.id!)) {
+                            newReactions[key] = rUsers.filter(id => id !== socket.id!);
+                            if (newReactions[key].length === 0) delete newReactions[key];
+                        }
+                    });
+
+                    // Add new reaction
+                    newReactions[emoji] = [...users, socket.id!];
+                }
+                return { ...msg, reactions: newReactions };
+            }
+            return msg;
+        }));
+
+        socket.emit("message-reaction", {
+            roomId,
+            messageId,
+            reaction: emoji,
+            senderId: socket.id
+        });
+        setActiveReactionMessageId(null);
+    };
+
+    const COMMON_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "😡"];
+
     return (
-        <div className="flex flex-col h-screen max-w-4xl mx-auto p-4">
-            <Card className="flex-1 flex flex-col bg-slate-900 border-slate-800">
-                <CardHeader className="border-b border-slate-800 py-3 flex flex-row items-center justify-between">
-                    <div className="flex items-center gap-2">
-                        <Lock className="w-4 h-4 text-emerald-400" />
-                        <CardTitle className="text-slate-100 text-lg">Room: {roomId}</CardTitle>
+        <div className="flex flex-col h-screen max-w-5xl mx-auto p-2 md:p-4">
+            <Card className="flex-1 !py-0 !px-0 flex flex-col bg-background/50 backdrop-blur-sm border-border/50 shadow-2xl overflow-hidden">
+                <CardHeader className="border-b border-border/40 py-4 px-6 flex flex-row items-center justify-between bg-background/40 backdrop-blur-md sticky top-0 z-10">
+                    <div className="flex items-center gap-3">
+                        <div className="bg-gradient-to-br from-emerald-500 to-cyan-500 p-2.5 rounded-xl shadow-lg shadow-emerald-500/20">
+                            <Lock className="w-5 h-5 text-white" />
+                        </div>
+                        <div>
+                            <CardTitle className="text-lg flex items-center gap-2 font-bold tracking-tight">
+                                Room: <span className="font-mono text-emerald-500">{roomId}</span>
+                            </CardTitle>
+                            <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
+                                {isConnected ? "Encrypted Connection Active" : "Disconnected"}
+                            </p>
+                        </div>
                     </div>
-                    <div className="flex items-center gap-2 text-slate-400 text-sm">
-                        <User className="w-4 h-4" />
-                        <span>{participantCount} Online</span>
-                        <div className={`w-2 h-2 rounded-full ${isConnected ? "bg-emerald-500" : "bg-red-500"}`} />
+                    <div className="flex items-center gap-2">
+                        <div className="flex items-center bg-muted/50 rounded-full p-1 border border-border/50">
+                            <Button variant="ghost" size="sm" onClick={() => setShowParticipantsModal(true)} className="text-muted-foreground hover:text-foreground rounded-full h-8 px-3">
+                                <Users className="w-4 h-4 mr-2" />
+                                <span>{participantCount}</span>
+                            </Button>
+                            {isCreator && (
+                                <Button variant="ghost" size="icon" onClick={() => setShowSettingsModal(true)} className="text-muted-foreground hover:text-foreground rounded-full h-8 w-8">
+                                    <Settings className="w-4 h-4" />
+                                </Button>
+                            )}
+                        </div>
+                        <div className="h-6 w-px bg-border/50 mx-1" />
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={joinCall}
+                            className="text-muted-foreground hover:text-emerald-500 hover:bg-emerald-500/10 rounded-full transition-all"
+                            title="Start Call"
+                        >
+                            <Phone className="w-5 h-5" />
+                        </Button>
+                        <ThemeToggle />
                     </div>
                 </CardHeader>
 
-                <CardContent className="flex-1 p-0 overflow-hidden relative">
-                    <ScrollArea className="h-full p-4">
-                        <div className="space-y-4 pb-4">
+                {localStream && (
+                    <CallInterface
+                        localStream={localStream}
+                        remoteStreams={remoteStreams}
+                        onLeave={leaveCall}
+                        nicknames={nicknames}
+                    />
+                )}
+
+                <CardContent className="flex-1 overflow-hidden p-0 relative">
+                    <ScrollArea className="h-full px-4 py-2">
+                        <div className="flex flex-col gap-4">
                             {messages.map((msg) => {
                                 const isMe = msg.senderId === "me";
                                 const senderName = isMe ? "Me" : (nicknames.get(msg.senderId) || `User ${msg.senderId.slice(0, 4)}`);
@@ -566,54 +638,127 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                 return (
                                     <div
                                         key={msg.id}
-                                        className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}
+                                        className={`flex ${isMe ? "justify-end" : "justify-start"} animate-fade-in-up`}
                                     >
                                         {!isMe && (
-                                            <span className="text-[10px] text-slate-400 mb-1 ml-1">
-                                                {senderName}
-                                            </span>
-                                        )}
-                                        <div
-                                            className={`max-w-[80%] rounded-lg px-4 py-2 ${isMe
-                                                ? "bg-emerald-600 text-white"
-                                                : "bg-slate-800 text-slate-100"
-                                                }`}
-                                        >
-                                            {msg.type === "file" && msg.file ? (
-                                                <div className="flex items-center gap-3">
-                                                    <div className="p-2 bg-black/20 rounded-lg">
-                                                        <FileIcon className="w-6 h-6" />
-                                                    </div>
-                                                    <div className="flex flex-col overflow-hidden">
-                                                        <span className="text-sm font-medium truncate max-w-[150px]">{msg.file.name}</span>
-                                                        <span className="text-xs opacity-70">{(msg.file.size / 1024).toFixed(1)} KB</span>
-                                                    </div>
-                                                    {!isMe && msg.encryptedKey && (
-                                                        <Button
-                                                            variant="ghost"
-                                                            size="icon"
-                                                            className="h-8 w-8 hover:bg-black/20 rounded-full"
-                                                            onClick={() => handleDownload(msg.file!.id, msg.file!.name, msg.encryptedKey!)}
-                                                        >
-                                                            <Download className="w-4 h-4" />
-                                                        </Button>
-                                                    )}
+                                            <div className="flex flex-col items-start mr-2">
+                                                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-indigo-500 flex items-center justify-center text-white text-xs font-bold shadow-sm">
+                                                    {senderName.charAt(0).toUpperCase()}
                                                 </div>
-                                            ) : (
-                                                <p>{msg.content}</p>
+                                            </div>
+                                        )}
+                                        <div className="relative group max-w-[80%]">
+                                            {!isMe && (
+                                                <span className="text-[10px] text-muted-foreground ml-1 mb-1 block">
+                                                    {senderName}
+                                                </span>
                                             )}
+                                            <div
+                                                className={`rounded-2xl px-4 py-3 relative shadow-md transition-all ${isMe
+                                                    ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white rounded-tr-sm"
+                                                    : "bg-card border border-border/50 text-foreground rounded-tl-sm hover:border-emerald-500/30"
+                                                    }`}
+                                            >
+                                                {/* Reaction Button (Visible on Hover) */}
+                                                <button
+                                                    onClick={() => setActiveReactionMessageId(activeReactionMessageId === msg.id ? null : msg.id)}
+                                                    className={`absolute ${isMe ? "-left-8" : "-right-8"} top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-all p-1.5 hover:bg-background/20 rounded-full backdrop-blur-sm`}
+                                                >
+                                                    <Smile className="w-4 h-4 text-muted-foreground" />
+                                                </button>
 
-                                            <span className="text-[10px] opacity-50 block mt-1 flex items-center justify-end gap-1">
-                                                {new Date(msg.timestamp).toLocaleTimeString()}
-                                                {isMe && (
-                                                    <span>
-                                                        {msg.status === "sending" && <Check className="w-3 h-3 text-slate-400" />}
-                                                        {msg.status === "sent" && <Check className="w-3 h-3 text-slate-300" />}
-                                                        {msg.status === "delivered" && <CheckCheck className="w-3 h-3 text-slate-300" />}
-                                                        {msg.status === "read" && <CheckCheck className="w-3 h-3 text-blue-400" />}
-                                                    </span>
+                                                {/* Reaction Picker Popover */}
+                                                {activeReactionMessageId === msg.id && (
+                                                    <div className={`absolute ${isMe ? "right-full mr-2" : "left-full ml-2"} top-1/2 -translate-y-1/2 bg-popover/90 backdrop-blur-md border border-border rounded-full shadow-xl p-1.5 flex gap-1 z-50 animate-fade-in`}>
+                                                        {COMMON_REACTIONS.map(emoji => (
+                                                            <button
+                                                                key={emoji}
+                                                                onClick={() => handleReaction(msg.id, emoji)}
+                                                                className="hover:bg-muted p-1.5 rounded-full text-lg transition-transform hover:scale-110"
+                                                            >
+                                                                {emoji}
+                                                            </button>
+                                                        ))}
+                                                    </div>
                                                 )}
-                                            </span>
+
+                                                {msg.type === "file" && msg.file ? (
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`p-2.5 rounded-xl ${isMe ? "bg-black/20" : "bg-muted"}`}>
+                                                            <FileIcon className="w-6 h-6" />
+                                                        </div>
+                                                        <div className="flex flex-col overflow-hidden">
+                                                            <span className="text-sm font-medium truncate max-w-[150px]">{msg.file.name}</span>
+                                                            <span className="text-xs opacity-70">{(msg.file.size / 1024).toFixed(1)} KB</span>
+                                                        </div>
+                                                        {!isMe && msg.encryptedKey && (
+                                                            <Button
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                className="h-8 w-8 hover:bg-black/10 rounded-full"
+                                                                onClick={() => handleDownload(msg.file!.id, msg.file!.name, msg.encryptedKey!)}
+                                                            >
+                                                                <Download className="w-4 h-4" />
+                                                            </Button>
+                                                        )}
+                                                    </div>
+                                                ) : (
+                                                    <div className={`markdown-content text-sm leading-relaxed break-words break-all whitespace-pre-wrap ${isMe ? 'text-white' : 'text-foreground'}`}>
+                                                        <ReactMarkdown
+                                                            remarkPlugins={[remarkGfm]}
+                                                            components={{
+                                                                p: ({ node, ...props }) => <p className="mb-1 last:mb-0" {...props} />,
+                                                                a: ({ node, ...props }) => <a className="underline hover:opacity-80 transition-opacity" target="_blank" rel="noopener noreferrer" {...props} />,
+                                                                code: ({ node, className, children, ...props }: any) => {
+                                                                    const match = /language-(\w+)/.exec(className || '')
+                                                                    return !match ? (
+                                                                        <code className={`rounded px-1 py-0.5 font-mono text-xs ${isMe ? "bg-black/20" : "bg-muted"}`} {...props}>
+                                                                            {children}
+                                                                        </code>
+                                                                    ) : (
+                                                                        <code className={`block rounded p-2 font-mono text-xs overflow-x-auto my-1 ${isMe ? "bg-black/20" : "bg-muted"}`} {...props}>
+                                                                            {children}
+                                                                        </code>
+                                                                    )
+                                                                },
+                                                                ul: ({ node, ...props }) => <ul className="list-disc list-inside mb-1" {...props} />,
+                                                                ol: ({ node, ...props }) => <ol className="list-decimal list-inside mb-1" {...props} />,
+                                                                blockquote: ({ node, ...props }) => <blockquote className="border-l-2 border-current pl-2 italic my-1 opacity-80" {...props} />,
+                                                            }}
+                                                        >
+                                                            {msg.content}
+                                                        </ReactMarkdown>
+                                                    </div>
+                                                )}
+
+                                                {/* Reactions Display */}
+                                                {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                                                    <div className={`absolute -bottom-3 ${isMe ? 'right-0' : 'left-0'} flex items-center gap-0.5 bg-background/80 backdrop-blur-md border border-border/50 rounded-full px-1.5 py-0.5 shadow-sm z-10`}>
+                                                        {Object.entries(msg.reactions).map(([emoji, users]) => (
+                                                            <button
+                                                                key={emoji}
+                                                                onClick={() => handleReaction(msg.id, emoji)}
+                                                                className={`text-[10px] min-w-[20px] h-[16px] flex items-center justify-center rounded-full transition-all hover:scale-110 ${users.includes(socket.id!) ? 'bg-emerald-500/20 text-emerald-500' : 'hover:bg-muted/50'}`}
+                                                                title={users.map(u => nicknames.get(u) || u).join(", ")}
+                                                            >
+                                                                <span className="mr-0.5">{emoji}</span>
+                                                                <span className="font-medium opacity-80">{users.length}</span>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                <span className="text-[10px] opacity-60 block mt-1 flex items-center justify-end gap-1">
+                                                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    {isMe && (
+                                                        <span>
+                                                            {msg.status === "sending" && <Check className="w-3 h-3 opacity-70" />}
+                                                            {msg.status === "sent" && <Check className="w-3 h-3 opacity-70" />}
+                                                            {msg.status === "delivered" && <CheckCheck className="w-3 h-3 opacity-70" />}
+                                                            {msg.status === "read" && <CheckCheck className="w-3 h-3 text-blue-200" />}
+                                                        </span>
+                                                    )}
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
                                 );
@@ -623,19 +768,23 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     </ScrollArea>
                 </CardContent>
 
-                <div className="p-4 border-t border-slate-800 bg-slate-900">
+                <div className="p-3 border-t border-border/40 bg-background/40 backdrop-blur-md">
                     {typingUsers.size > 0 && (
-                        <div className="text-xs text-slate-400 mb-2 italic">
+                        <div className="text-xs text-emerald-500 mb-2 italic animate-pulse flex items-center gap-1 px-2">
+                            <span className="w-1 h-1 rounded-full bg-emerald-500 animate-bounce" />
+                            <span className="w-1 h-1 rounded-full bg-emerald-500 animate-bounce delay-75" />
+                            <span className="w-1 h-1 rounded-full bg-emerald-500 animate-bounce delay-150" />
                             {getTypingIndicator()}
                         </div>
                     )}
                     <div className="relative">
                         {showEmojiPicker && (
-                            <div className="absolute bottom-full right-0 mb-2 z-50">
+                            <div className="absolute bottom-full right-0 mb-4 z-50 animate-fade-in-up">
                                 <EmojiPicker
                                     onEmojiClick={handleEmojiClick}
                                     theme={"dark" as any}
                                     lazyLoadEmojis={true}
+                                    style={{ boxShadow: '0 10px 40px rgba(0,0,0,0.5)', border: '1px solid var(--border)', backgroundColor: '#0f172a' }}
                                 />
                             </div>
                         )}
@@ -644,7 +793,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                 e.preventDefault();
                                 sendMessage();
                             }}
-                            className="flex gap-2"
+                            className="relative flex items-center gap-2 bg-muted/30 rounded-3xl border border-border/50 focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/20 transition-all p-1.5"
                         >
                             <input
                                 type="file"
@@ -652,50 +801,217 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                 onChange={handleFileSelect}
                                 className="hidden"
                             />
+
                             <Button
                                 type="button"
                                 size="icon"
                                 variant="ghost"
                                 onClick={() => fileInputRef.current?.click()}
-                                className="text-slate-400 hover:text-emerald-400 hover:bg-slate-800"
+                                className="text-muted-foreground hover:text-emerald-500 hover:bg-emerald-500/10 rounded-full h-9 w-9 transition-colors shrink-0"
                                 disabled={isUploading}
                             >
                                 {isUploading ? (
-                                    <div className="w-4 h-4 border-2 border-slate-400 border-t-emerald-400 rounded-full animate-spin" />
+                                    <div className="w-4 h-4 border-2 border-muted-foreground border-t-emerald-500 rounded-full animate-spin" />
                                 ) : (
                                     <Paperclip className="w-5 h-5" />
                                 )}
                             </Button>
 
-                            <div className="relative flex-1">
-                                <Input
-                                    ref={inputRef}
-                                    value={inputMessage}
-                                    onChange={handleInputChange}
-                                    placeholder="Type a secure message..."
-                                    className="bg-slate-950 border-slate-800 text-slate-100 focus:ring-emerald-500 pr-10"
-                                />
+                            <Input
+                                ref={inputRef}
+                                value={inputMessage}
+                                onChange={handleInputChange}
+                                maxLength={1000}
+                                placeholder="Type a secure message..."
+                                className="flex-1 bg-transparent border-none text-foreground focus-visible:ring-0 px-2 py-3 h-auto shadow-none placeholder:text-muted-foreground/70"
+                            />
+
+                            {inputMessage.length > 0 && (
+                                <span className={`text-[10px] font-mono mr-2 ${inputMessage.length > 900 ? "text-red-500 font-bold" : "text-muted-foreground/50"}`}>
+                                    {inputMessage.length}/1000
+                                </span>
+                            )}
+
+                            <div className="flex items-center gap-1 pr-1">
                                 <Button
                                     type="button"
-                                    size="sm"
+                                    size="icon"
                                     variant="ghost"
                                     onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0 hover:bg-slate-800"
+                                    className={`h-9 w-9 rounded-full transition-colors ${showEmojiPicker ? 'text-emerald-500 bg-emerald-500/10' : 'text-muted-foreground hover:text-emerald-500 hover:bg-emerald-500/10'}`}
                                 >
-                                    <Smile className="h-4 w-4 text-slate-400 hover:text-emerald-400" />
+                                    <Smile className="w-5 h-5" />
+                                </Button>
+
+                                <Button
+                                    type="submit"
+                                    size="icon"
+                                    className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-full h-9 w-9 shadow-lg shadow-emerald-500/20 transition-transform hover:scale-105 shrink-0"
+                                    disabled={!isConnected}
+                                >
+                                    <Send className="w-4 h-4 ml-0.5" />
                                 </Button>
                             </div>
-                            <Button
-                                type="submit"
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                                disabled={!isConnected}
-                            >
-                                <Send className="w-4 h-4" />
-                            </Button>
                         </form>
                     </div>
                 </div>
             </Card>
-        </div>
+
+            {/* Password Modal */}
+            {
+                showPasswordModal && (
+                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50">
+                        <Card className="w-full max-w-sm bg-slate-900 border-slate-800">
+                            <CardHeader>
+                                <CardTitle className="text-white">Password Required</CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-4">
+                                <Input
+                                    type="password"
+                                    placeholder="Enter room password"
+                                    value={passwordInput}
+                                    onChange={(e) => setPasswordInput(e.target.value)}
+                                    className="bg-slate-950 border-slate-800 text-white"
+                                />
+                                <Button
+                                    onClick={() => {
+                                        socket.emit("join-room", { roomId, nickname, userLimit, password: passwordInput });
+                                        setShowPasswordModal(false);
+                                    }}
+                                    className="w-full bg-emerald-600 hover:bg-emerald-700"
+                                >
+                                    Join Room
+                                </Button>
+                            </CardContent>
+                        </Card>
+                    </div>
+                )
+            }
+
+            {/* Settings Modal */}
+            {
+                showSettingsModal && (
+                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowSettingsModal(false)}>
+                        <Card className="w-full max-w-md bg-slate-900 border-slate-800" onClick={e => e.stopPropagation()}>
+                            <CardHeader className="flex flex-row items-center justify-between">
+                                <CardTitle className="text-white">Room Settings</CardTitle>
+                                <Button variant="ghost" size="icon" onClick={() => setShowSettingsModal(false)}>
+                                    <X className="w-4 h-4 text-slate-400" />
+                                </Button>
+                            </CardHeader>
+                            <CardContent className="space-y-4">
+                                <div className="space-y-2">
+                                    <label className="text-sm text-slate-400">User Limit</label>
+                                    <Input
+                                        type="number"
+                                        placeholder="Max users"
+                                        value={newLimit}
+                                        onChange={(e) => setNewLimit(e.target.value)}
+                                        className="bg-slate-950 border-slate-800 text-white"
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm text-slate-400">Update Password (leave empty to remove)</label>
+                                    <Input
+                                        type="password"
+                                        placeholder="New password"
+                                        value={newPassword}
+                                        onChange={(e) => setNewPassword(e.target.value)}
+                                        className="bg-slate-950 border-slate-800 text-white"
+                                    />
+                                </div>
+                                <Button
+                                    onClick={() => {
+                                        socket.emit("update-room-settings", {
+                                            roomId,
+                                            limit: newLimit ? parseInt(newLimit) : undefined,
+                                            password: newPassword
+                                        });
+                                        setShowSettingsModal(false);
+                                        setNewPassword("");
+                                        setNewLimit("");
+                                    }}
+                                    className="w-full bg-emerald-600 hover:bg-emerald-700"
+                                >
+                                    Save Changes
+                                </Button>
+                            </CardContent>
+                        </Card>
+                    </div>
+                )
+            }
+
+            {/* Participants Modal */}
+            {
+                showParticipantsModal && (
+                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowParticipantsModal(false)}>
+                        <Card className="w-full max-w-md bg-slate-900 border-slate-800 max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                            <CardHeader className="flex flex-row items-center justify-between border-b border-slate-800">
+                                <CardTitle className="text-white">Participants ({participants.length})</CardTitle>
+                                <Button variant="ghost" size="icon" onClick={() => setShowParticipantsModal(false)}>
+                                    <X className="w-4 h-4 text-slate-400" />
+                                </Button>
+                            </CardHeader>
+                            <CardContent className="p-0 overflow-hidden flex-1">
+                                <ScrollArea className="h-full max-h-[60vh]">
+                                    <div className="p-4 space-y-2">
+                                        {participants.map((p) => (
+                                            <div key={p.socketId} className="flex items-center justify-between p-2 rounded bg-slate-950/50 border border-slate-800">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center">
+                                                        <User className="w-4 h-4 text-emerald-400" />
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-sm font-medium text-white">
+                                                            {p.nickname || "Anonymous"}
+                                                            {p.socketId === socket.id && " (You)"}
+                                                        </p>
+                                                        <p className="text-xs text-slate-500">ID: {p.userId.slice(0, 8)}...</p>
+                                                    </div>
+                                                </div>
+                                                {isCreator && p.socketId !== socket.id && (
+                                                    <div className="flex items-center gap-1">
+                                                        {p.isMuted ? (
+                                                            <Button
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                className="h-8 w-8 text-red-400 hover:text-red-300"
+                                                                onClick={() => socket.emit("unmute-user", { roomId, targetUserId: p.userId })}
+                                                                title="Unmute"
+                                                            >
+                                                                <MicOff className="w-4 h-4" />
+                                                            </Button>
+                                                        ) : (
+                                                            <Button
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                className="h-8 w-8 text-slate-400 hover:text-yellow-400"
+                                                                onClick={() => socket.emit("mute-user", { roomId, targetUserId: p.userId })}
+                                                                title="Mute"
+                                                            >
+                                                                <Mic className="w-4 h-4" />
+                                                            </Button>
+                                                        )}
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="icon"
+                                                            className="h-8 w-8 text-slate-400 hover:text-red-400"
+                                                            onClick={() => socket.emit("kick-user", { roomId, targetUserId: p.userId })}
+                                                            title="Kick"
+                                                        >
+                                                            <UserX className="w-4 h-4" />
+                                                        </Button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </ScrollArea>
+                            </CardContent>
+                        </Card>
+                    </div>
+                )
+            }
+        </div >
     );
 }

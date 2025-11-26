@@ -60,7 +60,7 @@ export function useWebRTC(roomId: string) {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             setLocalStream(stream);
-            socket.emit("join-call", { roomId });
+            // socket.emit("join-call", { roomId }); // Moved to useEffect
             return stream;
         } catch (err) {
             console.error("Error accessing media devices:", err);
@@ -147,12 +147,16 @@ export function useWebRTC(roomId: string) {
         socket.on("user-disconnected-from-call", handleUserDisconnected);
         socket.on("signal", handleSignal);
 
+        // Emit join-call AFTER listeners are set up
+        socket.emit("join-call", { roomId });
+
         return () => {
             socket.off("user-connected-to-call", handleUserConnected);
             socket.off("user-disconnected-from-call", handleUserDisconnected);
             socket.off("signal", handleSignal);
+            socket.emit("leave-call", { roomId }); // Ensure we leave when component unmounts/stream changes
         };
-    }, [localStream, createPeer]);
+    }, [localStream, createPeer, roomId]);
 
     return { localStream, remoteStreams, joinCall, leaveCall };
 }

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { registerUser } from "@/actions/register";
 import Link from "next/link";
+import { UserPlus } from "lucide-react";
 
 export default function RegisterPage() {
     const [error, setError] = useState("");
@@ -25,8 +26,12 @@ export default function RegisterPage() {
     return (
         <div className="flex items-center justify-center min-h-screen bg-slate-950">
             <Card className="w-[350px] bg-slate-900 border-slate-800 text-slate-100">
-                <CardHeader>
-                    <CardTitle>Create Account</CardTitle>
+                <CardHeader className="space-y-1 text-center">
+                    <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto mb-4">
+                        <UserPlus className="w-6 h-6 text-emerald-500" />
+                    </div>
+                    <CardTitle className="text-2xl font-bold">Create Account</CardTitle>
+                    <p className="text-sm text-muted-foreground">Enter your details to get started</p>
                 </CardHeader>
                 <CardContent>
                     <form action={handleSubmit} className="space-y-4">

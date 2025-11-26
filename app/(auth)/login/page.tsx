@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import Link from "next/link";
+import { Lock } from "lucide-react";
 
 export default function LoginPage() {
     const [email, setEmail] = useState("");
@@ -43,8 +44,12 @@ export default function LoginPage() {
     return (
         <div className="flex items-center justify-center min-h-screen bg-slate-950">
             <Card className="w-[350px] bg-slate-900 border-slate-800 text-slate-100">
-                <CardHeader>
-                    <CardTitle>Login</CardTitle>
+                <CardHeader className="space-y-1 text-center">
+                    <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto mb-4">
+                        <Lock className="w-6 h-6 text-emerald-500" />
+                    </div>
+                    <CardTitle className="text-2xl font-bold">Welcome Back</CardTitle>
+                    <p className="text-sm text-muted-foreground">Enter your credentials to access your account</p>
                 </CardHeader>
                 <CardContent>
                     <form onSubmit={handleSubmit} className="space-y-4">

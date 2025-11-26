@@ -20,14 +20,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Send, User, Users, Lock, Check, CheckCheck, Smile, Paperclip, FileIcon, Download, Image as ImageIcon, Settings, Phone, Mic, MicOff, UserX, X } from "lucide-react";
+import { Send, User, Users, Lock, Check, CheckCheck, Smile, Paperclip, FileIcon, Download, Image as ImageIcon, Settings, Phone, Mic, MicOff, UserX, X, ArrowLeft } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useTheme } from "next-themes";
-import { useWebRTC } from "@/hooks/useWebRTC";
+// import { useWebRTC } from "@/hooks/useWebRTC";
 import CallInterface from "./CallInterface";
 
 const EmojiPicker = dynamic(() => import("emoji-picker-react"), { ssr: false });
@@ -81,7 +81,10 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const nickname = searchParams.get("nickname") || "Anonymous";
     const userLimit = searchParams.get("limit") ? parseInt(searchParams.get("limit")!) : undefined;
     const { theme } = useTheme();
-    const { localStream, remoteStreams, joinCall, leaveCall } = useWebRTC(roomId);
+    // const { localStream, remoteStreams, joinCall, leaveCall } = useWebRTC(roomId);
+    const joinCall = () => { console.log("Calling disabled"); }; // Placeholder to prevent errors
+    const localStream = null;
+    const remoteStreams = new Map();
 
     const myKeys = useRef<{ public: CryptoKey; private: CryptoKey } | null>(null);
     const otherUsersKeys = useRef<Map<string, CryptoKey>>(new Map());
@@ -96,7 +99,31 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
     useEffect(() => {
         scrollToBottom();
-    }, [messages]);
+        // Save to local storage if enabled
+        const saveHistory = localStorage.getItem("save_history") === "true";
+        if (saveHistory && messages.length > 0) {
+            localStorage.setItem(`chat_history_${roomId}`, JSON.stringify({
+                timestamp: Date.now(),
+                messages
+            }));
+        }
+    }, [messages, roomId]);
+
+    useEffect(() => {
+        // Load history if enabled and valid (< 24h)
+        const saveHistory = localStorage.getItem("save_history") === "true";
+        if (saveHistory) {
+            const stored = localStorage.getItem(`chat_history_${roomId}`);
+            if (stored) {
+                const { timestamp, messages: storedMessages } = JSON.parse(stored);
+                if (Date.now() - timestamp < 24 * 60 * 60 * 1000) {
+                    setMessages(storedMessages);
+                } else {
+                    localStorage.removeItem(`chat_history_${roomId}`);
+                }
+            }
+        }
+    }, [roomId]);
 
     useEffect(() => {
         const init = async () => {
@@ -116,7 +143,21 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             const password = storedPassword || searchParams.get("password");
             if (storedPassword) sessionStorage.removeItem("temp_room_password");
 
-            socket.emit("join-room", { roomId, nickname, userLimit, password });
+            // Nickname Enforcement
+            if (nickname === "Anonymous" && !sessionStorage.getItem("nickname_set")) {
+                const enteredNickname = prompt("Please enter a nickname to join:");
+                if (!enteredNickname) {
+                    router.push("/");
+                    return;
+                }
+                // Update URL with nickname (optional, but good for consistency)
+                // For now, we just use it for the socket connection
+                sessionStorage.setItem("nickname_set", "true");
+                socket.emit("join-room", { roomId, nickname: enteredNickname, userLimit, password });
+            } else {
+                socket.emit("join-room", { roomId, nickname, userLimit, password });
+            }
+
             setIsConnected(true);
 
             socket.on("error", (err: string) => {
@@ -599,22 +640,28 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     return (
         <div className="flex flex-col h-screen max-w-5xl mx-auto p-2 md:p-4">
             <Card className="flex-1 !py-0 !px-0 flex flex-col bg-background/50 backdrop-blur-sm border-border/50 shadow-2xl overflow-hidden">
-                <CardHeader className="border-b border-border/40 py-4 px-6 flex flex-row items-center justify-between bg-background/40 backdrop-blur-md sticky top-0 z-10">
-                    <div className="flex items-center gap-3">
-                        <div className="bg-gradient-to-br from-emerald-500 to-cyan-500 p-2.5 rounded-xl shadow-lg shadow-emerald-500/20">
-                            <Lock className="w-5 h-5 text-white" />
+                <CardHeader className="border-b border-border/40 py-3 px-4 flex flex-col md:flex-row items-start md:items-center justify-between bg-background/40 backdrop-blur-md sticky top-0 z-10 gap-3">
+                    <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-start">
+                        <div className="flex items-center gap-3">
+                            <Button variant="ghost" size="icon" onClick={() => router.push("/")} className="mr-1 rounded-full hover:bg-muted">
+                                <ArrowLeft className="w-5 h-5" />
+                            </Button>
+                            <div className="bg-gradient-to-br from-emerald-500 to-cyan-500 p-2.5 rounded-xl shadow-lg shadow-emerald-500/20">
+                                <Lock className="w-5 h-5 text-white" />
+                            </div>
+                            <div>
+                                <CardTitle className="text-base md:text-lg flex items-center gap-2 font-bold tracking-tight">
+                                    Room: <span className="font-mono text-emerald-500 truncate max-w-[100px] md:max-w-none">{roomId}</span>
+                                </CardTitle>
+                                <p className="text-[10px] md:text-xs text-muted-foreground flex items-center gap-1">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
+                                    {isConnected ? "Encrypted" : "Disconnected"}
+                                </p>
+                            </div>
                         </div>
-                        <div>
-                            <CardTitle className="text-lg flex items-center gap-2 font-bold tracking-tight">
-                                Room: <span className="font-mono text-emerald-500">{roomId}</span>
-                            </CardTitle>
-                            <p className="text-xs text-muted-foreground flex items-center gap-1">
-                                <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
-                                {isConnected ? "Encrypted Connection Active" : "Disconnected"}
-                            </p>
-                        </div>
+                        {/* Mobile Toggle for Controls could go here if needed, but for now we stack or flow */}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 w-full md:w-auto justify-end">
                         <div className="flex items-center bg-muted/50 rounded-full p-1 border border-border/50">
                             <Button variant="ghost" size="sm" onClick={() => setShowParticipantsModal(true)} className="text-muted-foreground hover:text-foreground rounded-full h-8 px-3">
                                 <Users className="w-4 h-4 mr-2" />
@@ -627,7 +674,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                             )}
                         </div>
                         <div className="h-6 w-px bg-border/50 mx-1" />
-                        <Button
+                        {/* <Button
                             variant="ghost"
                             size="icon"
                             onClick={joinCall}
@@ -635,7 +682,7 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                             title="Start Call"
                         >
                             <Phone className="w-5 h-5" />
-                        </Button>
+                        </Button> */}
                         <ThemeToggle />
                     </div>
                 </CardHeader>

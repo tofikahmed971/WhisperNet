@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Lock, Shield, Zap, Eye, Users, MessageSquare, ArrowRight, CheckCircle2, X } from "lucide-react";
+import Link from "next/link";
 
 export default function Home() {
   const router = useRouter();
@@ -67,8 +68,12 @@ export default function Home() {
             </span>
           </div>
           <div className="flex gap-4">
-            <Button variant="ghost" className="text-muted-foreground hover:text-foreground">Login</Button>
-            <Button className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-500/20">Sign Up</Button>
+            <Link href="/login">
+              <Button variant="ghost" className="text-muted-foreground hover:text-foreground">Login</Button>
+            </Link>
+            <Link href="/register">
+              <Button className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-500/20">Sign Up</Button>
+            </Link>
           </div>
         </div>
       </nav>

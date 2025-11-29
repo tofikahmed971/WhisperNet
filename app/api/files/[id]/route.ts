@@ -6,7 +6,6 @@ import { existsSync } from "fs";
 const UPLOAD_DIR = join(process.cwd(), "uploads");
 
 export async function GET(
-    request: NextRequest,
     { params }: { params: Promise<{ id: string }> }
 ) {
     try {
@@ -43,6 +42,7 @@ export async function DELETE(
     { params }: { params: Promise<{ id: string }> }
 ) {
     try {
+
         const { id } = await params;
         const fileId = id;
         const filePath = join(UPLOAD_DIR, fileId);

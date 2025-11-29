@@ -11,22 +11,51 @@ export async function generateKeyPair() {
     );
 }
 
+export async function generateSigningKeyPair() {
+    return await crypto.subtle.generateKey(
+        {
+            name: "ECDSA",
+            namedCurve: "P-256",
+        },
+        true,
+        ["sign", "verify"]
+    );
+}
+
 export async function exportKey(key: CryptoKey) {
     const exported = await crypto.subtle.exportKey("jwk", key);
     return exported;
 }
 
 export async function importKey(jwk: JsonWebKey, usage: KeyUsage[]) {
-    return await crypto.subtle.importKey(
-        "jwk",
-        jwk,
-        {
-            name: "RSA-OAEP",
-            hash: "SHA-256",
-        },
-        true,
-        usage
-    );
+    // Determine algorithm based on usage or key type properties if possible, 
+    // but for simplicity we might need separate import functions or try-catch.
+    // However, RSA keys usually have "n" and "e", ECDSA keys have "x" and "y".
+
+    if (jwk.kty === "RSA") {
+        return await crypto.subtle.importKey(
+            "jwk",
+            jwk,
+            {
+                name: "RSA-OAEP",
+                hash: "SHA-256",
+            },
+            true,
+            usage
+        );
+    } else if (jwk.kty === "EC") {
+        return await crypto.subtle.importKey(
+            "jwk",
+            jwk,
+            {
+                name: "ECDSA",
+                namedCurve: "P-256",
+            },
+            true,
+            usage
+        );
+    }
+    throw new Error("Unsupported key type");
 }
 
 export async function encryptMessage(publicKey: CryptoKey, message: string) {
@@ -53,6 +82,35 @@ export async function decryptMessage(privateKey: CryptoKey, encryptedMessage: st
     );
     const decoder = new TextDecoder();
     return decoder.decode(decrypted);
+}
+
+export async function signMessage(privateKey: CryptoKey, message: string) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(message);
+    const signature = await crypto.subtle.sign(
+        {
+            name: "ECDSA",
+            hash: { name: "SHA-256" },
+        },
+        privateKey,
+        data
+    );
+    return arrayBufferToBase64(signature);
+}
+
+export async function verifyMessage(publicKey: CryptoKey, message: string, signature: string) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(message);
+    const signatureBuffer = base64ToArrayBuffer(signature);
+    return await crypto.subtle.verify(
+        {
+            name: "ECDSA",
+            hash: { name: "SHA-256" },
+        },
+        publicKey,
+        signatureBuffer,
+        data
+    );
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {

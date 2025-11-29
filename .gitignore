@@ -42,3 +42,9 @@ next-env.d.ts
 
 #scripts
 stress-test.ts
+
+#docs
+/docs
+
+#uploads
+/uploads

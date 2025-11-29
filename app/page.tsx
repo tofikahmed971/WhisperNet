@@ -63,8 +63,8 @@ export default function Home() {
             <div className="relative w-10 h-10 bg-gradient-to-br from-emerald-400 to-cyan-400 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20">
               <Lock className="w-6 h-6 text-slate-950" />
             </div>
-            <span className="text-2xl font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-              WhisperNet
+            <span className="text-xl font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
+              Secure Chat
             </span>
           </div>
           <div className="flex gap-4">
@@ -85,6 +85,10 @@ export default function Home() {
             <Shield className="w-4 h-4 text-emerald-400" />
             <span className="text-sm text-emerald-400 font-medium">End-to-End Encrypted</span>
           </div>
+
+          <h2 className="text-4xl md:text-6xl font-bold text-foreground mb-6 animate-fade-in-up leading-tight">
+            End-to-End Encrypted Chat Room Web Application
+          </h2>
 
           <h1 className="text-6xl md:text-7xl font-bold text-foreground mb-6 leading-tight tracking-tight animate-fade-in-up" style={{ animationDelay: '0.1s' }}>
             Private Conversations,
@@ -107,12 +111,6 @@ export default function Home() {
             >
               Get Started
               <ArrowRight className="ml-2 h-5 w-5" />
-            </Button>
-            <Button
-              variant="outline"
-              className="h-14 px-8 text-lg border-border bg-background/50 hover:bg-accent hover:text-accent-foreground backdrop-blur-sm transition-all"
-            >
-              Learn More
             </Button>
           </div>
 
@@ -167,7 +165,7 @@ export default function Home() {
       {/* Footer */}
       <footer className="border-t border-border/50 py-8 relative z-10 bg-background/50 backdrop-blur-sm">
         <div className="container mx-auto px-6 text-center text-muted-foreground text-sm">
-          <p>© 2025 WhisperNet. Secure by design.</p>
+          <p>© 2025 Secure Chat. Secure by design.</p>
         </div>
       </footer>
 
@@ -185,7 +183,7 @@ export default function Home() {
                 <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto mb-4">
                   <Users className="w-6 h-6 text-emerald-500" />
                 </div>
-                <h2 className="text-2xl font-bold text-foreground mb-2">Join WhisperNet</h2>
+                <h2 className="text-2xl font-bold text-foreground mb-2">Join Chat Room</h2>
                 <p className="text-muted-foreground text-sm">Enter a nickname to get started</p>
               </div>
 

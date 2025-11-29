@@ -15,12 +15,15 @@ import {
     importSymKey,
     encryptFile,
     decryptFile,
+    generateSigningKeyPair,
+    signMessage,
+    verifyMessage,
 } from "@/lib/crypto";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Send, User, Users, Lock, Check, CheckCheck, Smile, Paperclip, FileIcon, Download, Image as ImageIcon, Settings, Phone, Mic, MicOff, UserX, X, ArrowLeft } from "lucide-react";
+import { Send, User, Users, Lock, Check, CheckCheck, Smile, Paperclip, FileIcon, Download, Image as ImageIcon, Settings, Phone, Mic, MicOff, UserX, X, ArrowLeft, Shield, Home } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import ReactMarkdown from "react-markdown";
@@ -49,6 +52,8 @@ interface Message {
     encryptedKey?: string;
     originalPayload?: any; // Store original encrypted payload for history
     reactions?: Record<string, string[]>; // emoji -> [senderIds]
+    signature?: string;
+    verified?: boolean;
 }
 
 interface ChatRoomProps {
@@ -97,7 +102,9 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     const remoteStreams = new Map();
 
     const myKeys = useRef<{ public: CryptoKey; private: CryptoKey } | null>(null);
+    const mySigningKeys = useRef<{ public: CryptoKey; private: CryptoKey } | null>(null);
     const otherUsersKeys = useRef<Map<string, CryptoKey>>(new Map());
+    const otherUsersSigningKeys = useRef<Map<string, CryptoKey>>(new Map());
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -138,20 +145,30 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
     }, [messages, roomId, saveHistory]);
 
     // Key Persistence Helpers
-    const saveKeys = async (keys: { public: CryptoKey; private: CryptoKey }) => {
+    const saveKeys = async (keys: { public: CryptoKey; private: CryptoKey }, signingKeys: { public: CryptoKey; private: CryptoKey }) => {
         const exportedPub = await exportKey(keys.public);
         const exportedPriv = await exportKey(keys.private);
-        localStorage.setItem(`chat_keys_${roomId}`, JSON.stringify({ pub: exportedPub, priv: exportedPriv }));
+        const exportedSignPub = await exportKey(signingKeys.public);
+        const exportedSignPriv = await exportKey(signingKeys.private);
+        localStorage.setItem(`chat_keys_${roomId}`, JSON.stringify({ pub: exportedPub, priv: exportedPriv, signPub: exportedSignPub, signPriv: exportedSignPriv }));
     };
 
     const loadKeys = async () => {
         const stored = localStorage.getItem(`chat_keys_${roomId}`);
         if (stored) {
             try {
-                const { pub, priv } = JSON.parse(stored);
+                const { pub, priv, signPub, signPriv } = JSON.parse(stored);
                 const publicKey = await importKey(pub, ["encrypt"]);
                 const privateKey = await importKey(priv, ["decrypt"]);
-                return { public: publicKey, private: privateKey };
+
+                let signingKeys = null;
+                if (signPub && signPriv) {
+                    const signPublicKey = await importKey(signPub, ["verify"]);
+                    const signPrivateKey = await importKey(signPriv, ["sign"]);
+                    signingKeys = { public: signPublicKey, private: signPrivateKey };
+                }
+
+                return { keys: { public: publicKey, private: privateKey }, signingKeys };
             } catch (e) {
                 console.error("Failed to load keys", e);
                 return null;
@@ -169,13 +186,19 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
             }
 
             // Try to load existing keys first
-            let keys = await loadKeys();
-            if (!keys) {
+            let loaded = await loadKeys();
+            let keys = loaded?.keys;
+            let signingKeys = loaded?.signingKeys;
+
+            if (!keys || !signingKeys) {
                 const newKeys = await generateKeyPair();
+                const newSigningKeys = await generateSigningKeyPair();
                 keys = { public: newKeys.publicKey, private: newKeys.privateKey };
-                await saveKeys(keys);
+                signingKeys = { public: newSigningKeys.publicKey, private: newSigningKeys.privateKey };
+                await saveKeys(keys, signingKeys);
             }
             myKeys.current = keys;
+            mySigningKeys.current = signingKeys;
 
             socket.auth = { userId };
             socket.connect();
@@ -296,17 +319,19 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     return [...prev, { socketId: data.socketId, userId: data.userId, nickname: data.nickname }];
                 });
 
-                if (myKeys.current) {
+                if (myKeys.current && mySigningKeys.current) {
                     const exportedPub = await exportKey(myKeys.current.public);
+                    const exportedSignPub = await exportKey(mySigningKeys.current.public);
                     socket.emit("signal", {
                         target: data.socketId,
-                        signal: { type: "offer-key", key: exportedPub },
+                        signal: { type: "offer-key", key: exportedPub, signingKey: exportedSignPub },
                     });
                 }
             });
 
             socket.on("user-left", (data: { socketId: string; userId: string }) => {
                 otherUsersKeys.current.delete(data.socketId);
+                otherUsersSigningKeys.current.delete(data.socketId);
                 setParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
                 setTypingUsers(prev => {
                     const newSet = new Set(prev);
@@ -320,16 +345,28 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 if (signal.type === "offer-key") {
                     const importedKey = await importKey(signal.key, ["encrypt"]);
                     otherUsersKeys.current.set(sender, importedKey);
-                    if (myKeys.current) {
+
+                    if (signal.signingKey) {
+                        const importedSignKey = await importKey(signal.signingKey, ["verify"]);
+                        otherUsersSigningKeys.current.set(sender, importedSignKey);
+                    }
+
+                    if (myKeys.current && mySigningKeys.current) {
                         const exportedPub = await exportKey(myKeys.current.public);
+                        const exportedSignPub = await exportKey(mySigningKeys.current.public);
                         socket.emit("signal", {
                             target: sender,
-                            signal: { type: "answer-key", key: exportedPub },
+                            signal: { type: "answer-key", key: exportedPub, signingKey: exportedSignPub },
                         });
                     }
                 } else if (signal.type === "answer-key") {
                     const importedKey = await importKey(signal.key, ["encrypt"]);
                     otherUsersKeys.current.set(sender, importedKey);
+
+                    if (signal.signingKey) {
+                        const importedSignKey = await importKey(signal.signingKey, ["verify"]);
+                        otherUsersSigningKeys.current.set(sender, importedSignKey);
+                    }
                 }
             });
 
@@ -391,6 +428,16 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                         content = await decryptSymMessage(aesKey, payload.content);
                     }
 
+                    let verified = false;
+                    if (payload.signature && otherUsersSigningKeys.current.has(senderId)) {
+                        try {
+                            // Verify signature against encrypted content to ensure it wasn't tampered
+                            verified = await verifyMessage(otherUsersSigningKeys.current.get(senderId)!, payload.content, payload.signature);
+                        } catch (e) {
+                            console.error("Signature verification failed", e);
+                        }
+                    }
+
                     setMessages((prev) => {
                         if (prev.some(m => m.id === (messageId || ""))) return prev;
                         return [
@@ -403,7 +450,9 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                 type: (type as "text" | "file") || "text",
                                 file: fileData,
                                 encryptedKey: myEncryptedKey,
-                                originalPayload: payload // Store original payload for history
+                                originalPayload: payload, // Store original payload for history
+                                signature: payload.signature,
+                                verified
                             },
                         ];
                     });
@@ -506,9 +555,15 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
 
             const messageId = crypto.randomUUID();
 
+            let signature = undefined;
+            if (mySigningKeys.current) {
+                signature = await signMessage(mySigningKeys.current.private, encryptedContent);
+            }
+
             const payload = {
                 content: encryptedContent,
                 keys: keysMap,
+                signature
             };
 
             socket.emit("send-message", {
@@ -527,7 +582,8 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                     content: inputMessage,
                     timestamp: Date.now(),
                     status: "sent",
-                    type: "text"
+                    type: "text",
+                    verified: true
                 },
             ]);
 
@@ -730,8 +786,8 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                 <CardHeader className="border-b border-border/40 py-2 px-3 md:py-3 md:px-4 flex flex-row items-center justify-between bg-background/40 backdrop-blur-md sticky top-0 z-10 gap-2 shrink-0">
                     <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-start">
                         <div className="flex items-center gap-3">
-                            <Button variant="ghost" size="icon" onClick={() => router.push("/")} className="mr-1 rounded-full hover:bg-muted">
-                                <ArrowLeft className="w-5 h-5" />
+                            <Button variant="ghost" size="icon" onClick={() => router.push("/")} className="mr-1 rounded-full hover:bg-muted" title="Home">
+                                <Home className="w-5 h-5" />
                             </Button>
                             <div className="bg-gradient-to-br from-emerald-500 to-cyan-500 p-2.5 rounded-xl shadow-lg shadow-emerald-500/20">
                                 <Lock className="w-5 h-5 text-white" />
@@ -884,6 +940,11 @@ export default function ChatRoom({ roomId }: ChatRoomProps) {
                                                     </div>
                                                 )}
                                                 <span className="text-[10px] opacity-60 block mt-1 flex items-center justify-end gap-1">
+                                                    {msg.verified !== undefined && (
+                                                        <span title={msg.verified ? "Verified Signature" : "Unverified / Tampered"}>
+                                                            {msg.verified ? <Shield className="w-3 h-3 text-emerald-500" /> : <Shield className="w-3 h-3 text-red-500" />}
+                                                        </span>
+                                                    )}
                                                     {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                                     {isMe && (
                                                         <span>
